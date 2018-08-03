@@ -382,9 +382,7 @@ UniValue getclaimbyid(const UniValue& params, bool fHelp)
                         "  \"n\"                   (numeric) vout value\n"
                         "  \"amount\"              (numeric) txout value\n"
                         "  \"effective amount\"    (numeric) txout amount plus amount from all supports associated with the claim\n"
-                        "  \"height\"              (numeric) the height of the block in which this claim transaction is located\n"
                         "  \"supports\"            (array of object) supports for this claim\n"
-                        "  \"valid at height\"     (numeric) the height at which the claim is valid\n"
                         "  [\n"
                         "    \"txid\"              (string) the txid of the support\n"
                         "    \"n\"                 (numeric) the index of the support in the transaction's list of outputs\n"
@@ -392,6 +390,8 @@ UniValue getclaimbyid(const UniValue& params, bool fHelp)
                         "    \"valid at height\"   (numeric) the height at which the support is valid\n"
                         "    \"amount\"            (numeric) the amount of the support\n"
                         "  ]\n"
+                        "  \"height\"              (numeric) the height of the block in which this claim transaction is located\n"
+                        "  \"valid at height\"     (numeric) the height at which the claim is valid\n"
                         "}\n"
         );
 
