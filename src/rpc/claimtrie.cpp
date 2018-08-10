@@ -3,6 +3,8 @@
 #include "rpc/server.h"
 #include "univalue.h"
 #include "txmempool.h"
+#include "consensus/validation.h"
+#include "boost/scope_exit.hpp"
 
 // Maximum block decrement that is allowed from rpc calls
 const int MAX_RPC_BLOCK_DECREMENTS = 50;
@@ -25,17 +27,17 @@ uint160 ParseClaimtrieId(const UniValue& v, std::string strName)
 
 UniValue getclaimsintrie(const UniValue& params, bool fHelp)
 {
-    if (fHelp || params.size() > 0)
+    if (fHelp || params.size() > 1)
         throw std::runtime_error(
             "getclaimsintrie\n"
             "Return all claims in the name trie.\n"
             "Arguments:\n"
-            "None\n"
+            "1.   \"minconf\"    (numeric, optional, default=1) the number of required confirmations\n"
             "Result: \n"
             "[\n"
             "  {\n"
-            "    \"name\"          (string) the name claimed\n"
-            "    \"claims\": [      (array of object) the claims for this name\n"
+            "    \"name\"        (string) the name claimed\n"
+            "    \"claims\": [   (array of object) the claims for this name\n"
             "      {\n"
             "        \"claimId\" (string) the claimId of the claim\n"
             "        \"txid\"    (string) the txid of the claim\n"
@@ -46,55 +48,54 @@ UniValue getclaimsintrie(const UniValue& params, bool fHelp)
             "      }\n"
             "    ]\n"
             "  }\n"
-            "]\n"
-        );
-    
+            "]\n");
+
     LOCK(cs_main);
+
+    int maxHeight = chainActive.Height();
+    if (params.size() > 0)
+        maxHeight -= params[0].get_int() - 1;
+
+    CCoinsViewCache coins(pcoinsTip);
+    CClaimTrieCache claimTrie(pclaimTrie);
+    if (maxHeight < chainActive.Height())
+        if (!RollBackTo(coins, claimTrie, chainActive[maxHeight]))
+            throw JSONRPCError(RPC_INTERNAL_ERROR, "Rollback failure");
+
     UniValue ret(UniValue::VARR);
-
-    CCoinsViewCache view(pcoinsTip);
-    std::vector<namedNodeType> nodes = pclaimTrie->flattenTrie();
-
+    std::vector<namedNodeType> nodes = claimTrie.flattenTrie();
     for (std::vector<namedNodeType>::iterator it = nodes.begin(); it != nodes.end(); ++it)
     {
-        if (!it->second.claims.empty())
-        {
+        UniValue claims(UniValue::VARR);
+        for (std::vector<CClaimValue>::iterator itClaims = it->second.claims.begin(); itClaims != it->second.claims.end(); ++itClaims) {
+            UniValue claim(UniValue::VOBJ);
+            claim.push_back(Pair("claimId", itClaims->claimId.GetHex()));
+            claim.push_back(Pair("txid", itClaims->outPoint.hash.GetHex()));
+            claim.push_back(Pair("n", (int)itClaims->outPoint.n));
+            claim.push_back(Pair("amount", ValueFromAmount(itClaims->nAmount)));
+            claim.push_back(Pair("height", itClaims->nHeight));
+            const CCoins* coin = coins.AccessCoins(itClaims->outPoint.hash);
+            if (!coin) {
+                LogPrintf("%s: %s does not exist in the coins view, despite being associated with a name\n",
+                    __func__, itClaims->outPoint.hash.GetHex());
+                claim.push_back(Pair("error", "No value found for claim"));
+            } else if (coin->vout.size() < itClaims->outPoint.n || coin->vout[itClaims->outPoint.n].IsNull()) {
+                LogPrintf("%s: the specified txout of %s appears to have been spent\n", __func__, itClaims->outPoint.hash.GetHex());
+                claim.push_back(Pair("error", "Txout spent"));
+            } else {
+                int op;
+                std::vector<std::vector<unsigned char> > vvchParams;
+                if (!DecodeClaimScript(coin->vout[itClaims->outPoint.n].scriptPubKey, op, vvchParams)) {
+                    LogPrintf("%s: the specified txout of %s does not have an claim command\n", __func__, itClaims->outPoint.hash.GetHex());
+                }
+                std::string sValue(vvchParams[1].begin(), vvchParams[1].end());
+                claim.push_back(Pair("value", sValue));
+            }
+            claims.push_back(claim);
+        }
+        if (!claims.empty()) {
             UniValue node(UniValue::VOBJ);
             node.push_back(Pair("name", it->first));
-            UniValue claims(UniValue::VARR);
-            for (std::vector<CClaimValue>::iterator itClaims = it->second.claims.begin(); itClaims != it->second.claims.end(); ++itClaims)
-            {
-                UniValue claim(UniValue::VOBJ);
-                claim.push_back(Pair("claimId", itClaims->claimId.GetHex()));
-                claim.push_back(Pair("txid", itClaims->outPoint.hash.GetHex()));
-                claim.push_back(Pair("n", (int)itClaims->outPoint.n));
-                claim.push_back(Pair("amount", ValueFromAmount(itClaims->nAmount)));
-                claim.push_back(Pair("height", itClaims->nHeight));
-                const CCoins* coin = view.AccessCoins(itClaims->outPoint.hash);
-                if (!coin)
-                {
-                    LogPrintf("%s: %s does not exist in the coins view, despite being associated with a name\n",
-                              __func__, itClaims->outPoint.hash.GetHex());
-                    claim.push_back(Pair("error", "No value found for claim"));
-                }
-                else if (coin->vout.size() < itClaims->outPoint.n || coin->vout[itClaims->outPoint.n].IsNull())
-                {
-                    LogPrintf("%s: the specified txout of %s appears to have been spent\n", __func__, itClaims->outPoint.hash.GetHex());
-                    claim.push_back(Pair("error", "Txout spent"));
-                }
-                else
-                {
-                    int op;
-                    std::vector<std::vector<unsigned char> > vvchParams;
-                    if (!DecodeClaimScript(coin->vout[itClaims->outPoint.n].scriptPubKey, op, vvchParams))
-                    {
-                        LogPrintf("%s: the specified txout of %s does not have an claim command\n", __func__, itClaims->outPoint.hash.GetHex());
-                    }
-                    std::string sValue(vvchParams[1].begin(), vvchParams[1].end());
-                    claim.push_back(Pair("value", sValue));
-                }
-                claims.push_back(claim);
-            }
             node.push_back(Pair("claims", claims));
             ret.push_back(node);
         }
@@ -104,27 +105,38 @@ UniValue getclaimsintrie(const UniValue& params, bool fHelp)
 
 UniValue getclaimtrie(const UniValue& params, bool fHelp)
 {
-    if (fHelp || params.size() > 0)
+    if (fHelp || params.size() > 1)
         throw std::runtime_error(
             "getclaimtrie\n"
             "Return the entire name trie.\n"
             "Arguments:\n"
-            "None\n"
+            "1.   \"minconf\"     (numeric, optional, default=1) the number of required confirmations\n"
             "Result: \n"
-            "{\n"
+            "[\n"
+            " {\n"
             "  \"name\"           (string) the name of the node\n"
             "  \"hash\"           (string) the hash of the node\n"
             "  \"txid\"           (string) (if value exists) the hash of the transaction which has successfully claimed this name\n"
             "  \"n\"              (numeric) (if value exists) vout value\n"
             "  \"value\"          (numeric) (if value exists) txout value\n"
             "  \"height\"         (numeric) (if value exists) the height of the block in which this transaction is located\n"
-            "}\n"
-        );
+            " }\n"
+            "]\n");
 
     LOCK(cs_main);
-    UniValue ret(UniValue::VARR);
 
-    std::vector<namedNodeType> nodes = pclaimTrie->flattenTrie();
+    int maxHeight = chainActive.Height();
+    if (params.size() > 0)
+        maxHeight -= params[0].get_int() - 1;
+
+    CCoinsViewCache coins(pcoinsTip);
+    CClaimTrieCache claimTrie(pclaimTrie);
+    if (maxHeight < chainActive.Height())
+        if (!RollBackTo(coins, claimTrie, chainActive[maxHeight]))
+            throw JSONRPCError(RPC_INTERNAL_ERROR, "Rollback failure");
+
+    UniValue ret(UniValue::VARR);
+    std::vector<namedNodeType> nodes = claimTrie.flattenTrie();
     for (std::vector<namedNodeType>::iterator it = nodes.begin(); it != nodes.end(); ++it)
     {
         UniValue node(UniValue::VOBJ);
@@ -143,9 +155,8 @@ UniValue getclaimtrie(const UniValue& params, bool fHelp)
     return ret;
 }
 
-bool getValueForClaim(const COutPoint& out, std::string& sValue)
+bool getValueForClaim(const CCoinsViewCache& view, const COutPoint& out, std::string& sValue)
 {
-    CCoinsViewCache view(pcoinsTip);
     const CCoins* coin = view.AccessCoins(out.hash);
     if (!coin)
     {
@@ -180,12 +191,13 @@ bool getValueForClaim(const COutPoint& out, std::string& sValue)
 
 UniValue getvalueforname(const UniValue& params, bool fHelp)
 {
-    if (fHelp || params.size() != 1)
+    if (fHelp || params.size() > 2)
         throw std::runtime_error(
             "getvalueforname \"name\"\n"
             "Return the value associated with a name, if one exists\n"
             "Arguments:\n"
             "1. \"name\"             (string) the name to look up\n"
+            "2. \"minconf\"          (numeric, optional, default=1) the number of required confirmations\n"
             "Result: \n"
             "\"value\"               (string) the value of the name, if it exists\n"
             "\"claimId\"             (string) the claimId for this name claim\n"
@@ -197,19 +209,32 @@ UniValue getvalueforname(const UniValue& params, bool fHelp)
         );
     LOCK(cs_main);
     std::string name = params[0].get_str();
-    CClaimValue claim;
+
+    int maxHeight = chainActive.Height();
+    if (params.size() > 1)
+        maxHeight -= params[1].get_int() - 1;
+
+    CCoinsViewCache coins(pcoinsTip);
+    CClaimTrieCache claimTrie(pclaimTrie);
+    if (maxHeight < chainActive.Height())
+        if (!RollBackTo(coins, claimTrie, chainActive[maxHeight]))
+            throw JSONRPCError(RPC_INTERNAL_ERROR, "Rollback failure");
+
     UniValue ret(UniValue::VOBJ);
-    if (!pclaimTrie->getInfoForName(name, claim))
-        return ret;
+    CClaimValue claim;
+    if (!claimTrie.getInfoForName(name, claim))
+        return ret; // they may have asked for a name that doesn't exist (which is not an error)
+
     std::string sValue;
-    if (!getValueForClaim(claim.outPoint, sValue))
+    if (!getValueForClaim(coins, claim.outPoint, sValue))
         return ret;
+
     ret.push_back(Pair("value", sValue));
     ret.push_back(Pair("claimId", claim.claimId.GetHex()));
     ret.push_back(Pair("txid", claim.outPoint.hash.GetHex()));
     ret.push_back(Pair("n", (int)claim.outPoint.n));
     ret.push_back(Pair("amount", claim.nAmount));
-    ret.push_back(Pair("effective amount", pclaimTrie->getEffectiveAmountForClaim(name, claim.claimId))); 
+    ret.push_back(Pair("effective amount", pclaimTrie->getEffectiveAmountForClaim(name, claim.claimId, maxHeight)));
     ret.push_back(Pair("height", claim.nHeight));
     return ret;
 }
@@ -218,7 +243,7 @@ typedef std::pair<CClaimValue, std::vector<CSupportValue> > claimAndSupportsType
 typedef std::map<uint160, claimAndSupportsType> claimSupportMapType;
 typedef std::map<uint160, std::vector<CSupportValue> > supportsWithoutClaimsMapType;
 
-UniValue claimsAndSupportsToJSON(claimSupportMapType::const_iterator itClaimsAndSupports, int nCurrentHeight)
+UniValue claimsAndSupportsToJSON(const CCoinsViewCache& view, claimSupportMapType::const_iterator itClaimsAndSupports, int nCurrentHeight)
 {
     UniValue ret(UniValue::VOBJ);
     const CClaimValue claim = itClaimsAndSupports->second.first;
@@ -250,7 +275,7 @@ UniValue claimsAndSupportsToJSON(claimSupportMapType::const_iterator itClaimsAnd
     }
     ret.push_back(Pair("nAmount", claim.nAmount));
     std::string sValue;
-    if (getValueForClaim(claim.outPoint, sValue))
+    if (getValueForClaim(view, claim.outPoint, sValue))
     {
         ret.push_back(Pair("value", sValue));
     }
@@ -282,16 +307,17 @@ UniValue supportsWithoutClaimsToJSON(supportsWithoutClaimsMapType::const_iterato
 
 UniValue getclaimsforname(const UniValue& params, bool fHelp)
 {
-    if (fHelp || params.size() != 1)
+    if (fHelp || params.size() > 2)
         throw std::runtime_error(
             "getclaimsforname\n"
             "Return all claims and supports for a name\n"
             "Arguments: \n"
-            "1.  \"name\"       (string) the name for which to get claims and supports\n"
+            "1.  \"name\"         (string) the name for which to get claims and supports\n"
+            "2.  \"minconf\"      (numeric, optional, default=1) the number of required confirmations\n"
             "Result:\n"
             "{\n"
             "  \"nLastTakeoverheight\" (numeric) the last height at which ownership of the name changed\n"
-            "  \"claims\": [    (array of object) claims for this name\n"
+            "  \"claims\": [      (array of object) claims for this name\n"
             "    {\n"
             "      \"claimId\"    (string) the claimId of this claim\n"
             "      \"txid\"       (string) the txid of this claim\n"
@@ -323,6 +349,42 @@ UniValue getclaimsforname(const UniValue& params, bool fHelp)
 
     LOCK(cs_main);
     std::string name = params[0].get_str();
+
+    UniValue ret(UniValue::VOBJ);
+
+    std::vector<CBlockIndex*> indexes;
+    CCoinsViewCache coins(pcoinsTip);
+    CClaimTrieCache claims(pclaimTrie);
+    CValidationState state;
+
+    BOOST_SCOPE_EXIT(&indexes, &coins, &claims, &state) {
+        // restore the rolled-back state
+        for (std::size_t i = indexes.size(); i > 0; --i) {
+            CBlock block;
+            ReadBlockFromDisk(block, indexes.back(), Params().GetConsensus());
+            ConnectBlock(block, state, indexes[i - 1], coins, claims);
+        }
+        if (!indexes.empty()) {
+            // necessary ?
+            coins.Flush();
+            claims.flush();
+        }
+    } BOOST_SCOPE_EXIT_END
+
+    if (params.size() > 1)
+    {
+        int minconf = params[1].get_int();
+        while(--minconf > 0) {
+            indexes.push_back(chainActive.Tip());
+            CBlock block;
+            ReadBlockFromDisk(block, indexes.back(), Params().GetConsensus());
+            DisconnectBlock(block, state, indexes.back(), coins, claims);
+            // assuming we don't need to resurrect the memory pool entries for this RPC call
+        }
+        coins.Flush(); // need flushes on every iteration?
+        claims.flush();
+    }
+
     claimsForNameType claimsForName = pclaimTrie->getClaimsForName(name);
     int nCurrentHeight = chainActive.Height();
 
@@ -338,20 +400,20 @@ UniValue getclaimsforname(const UniValue& params, bool fHelp)
         claimSupportMapType::iterator itClaimAndSupports = claimSupportMap.find(itSupports->supportedClaimId);
         if (itClaimAndSupports == claimSupportMap.end())
         {
-            std::pair<supportsWithoutClaimsMapType::iterator, bool> ret = supportsWithoutClaims.insert(std::pair<uint160, std::vector<CSupportValue> >(itSupports->supportedClaimId, std::vector<CSupportValue>()));
-            ret.first->second.push_back(*itSupports);
+            std::pair<supportsWithoutClaimsMapType::iterator, bool> pair = supportsWithoutClaims.insert(std::pair<uint160, std::vector<CSupportValue> >(itSupports->supportedClaimId, std::vector<CSupportValue>()));
+            pair.first->second.push_back(*itSupports);
         }
         else
         {
             itClaimAndSupports->second.second.push_back(*itSupports);
         }
     }
-    UniValue ret(UniValue::VOBJ);
+
     UniValue claimObjs(UniValue::VARR);
     ret.push_back(Pair("nLastTakeoverHeight", claimsForName.nLastTakeoverHeight));
     for (claimSupportMapType::const_iterator itClaimsAndSupports = claimSupportMap.begin(); itClaimsAndSupports != claimSupportMap.end(); ++itClaimsAndSupports)
     {
-        UniValue claimAndSupportsObj = claimsAndSupportsToJSON(itClaimsAndSupports, nCurrentHeight);
+        UniValue claimAndSupportsObj = claimsAndSupportsToJSON(coins, itClaimsAndSupports, nCurrentHeight);
         claimObjs.push_back(claimAndSupportsObj);
     }
     ret.push_back(Pair("claims", claimObjs));
@@ -408,7 +470,8 @@ UniValue getclaimbyid(const UniValue& params, bool fHelp)
             name, claimValue.claimId, supports);
 
         std::string sValue;
-        getValueForClaim(claimValue.outPoint, sValue);
+        CCoinsViewCache coins(pcoinsTip);
+        getValueForClaim(coins, claimValue.outPoint, sValue);
         claim.push_back(Pair("name", name));
         claim.push_back(Pair("value", sValue));
         claim.push_back(Pair("claimId", claimValue.claimId.GetHex()));

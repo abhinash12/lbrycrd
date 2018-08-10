@@ -17,6 +17,7 @@
 #include <boost/test/unit_test.hpp>
 #include <iostream>
 #include "test/test_bitcoin.h"
+#include "rpc/server.h"
 
 using namespace std;
 
@@ -2918,31 +2919,31 @@ BOOST_AUTO_TEST_CASE(value_proof_test)
 
     CClaimTrieProof proof;
 
-    proof = cache.getProofForName(sName1);
+    BOOST_CHECK(cache.getProofForName(sName1, proof));
     BOOST_CHECK(verify_proof(proof, chainActive.Tip()->hashClaimTrie, sName1));
     BOOST_CHECK(proof.outPoint == tx1OutPoint);
 
-    proof = cache.getProofForName(sName2);
+    BOOST_CHECK(cache.getProofForName(sName2, proof));
     BOOST_CHECK(verify_proof(proof, chainActive.Tip()->hashClaimTrie, sName2));
     BOOST_CHECK(proof.outPoint == tx2OutPoint);
 
-    proof = cache.getProofForName(sName3);
+    BOOST_CHECK(cache.getProofForName(sName3, proof));
     BOOST_CHECK(verify_proof(proof, chainActive.Tip()->hashClaimTrie, sName3));
     BOOST_CHECK(proof.outPoint == tx3OutPoint);
 
-    proof = cache.getProofForName(sName4);
+    BOOST_CHECK(cache.getProofForName(sName4, proof));
     BOOST_CHECK(verify_proof(proof, chainActive.Tip()->hashClaimTrie, sName4));
     BOOST_CHECK(proof.outPoint == tx4OutPoint);
 
-    proof = cache.getProofForName(sName5);
+    BOOST_CHECK(cache.getProofForName(sName5, proof));
     BOOST_CHECK(verify_proof(proof, chainActive.Tip()->hashClaimTrie, sName5));
     BOOST_CHECK(proof.hasValue == false);
 
-    proof = cache.getProofForName(sName6);
+    BOOST_CHECK(cache.getProofForName(sName6, proof));
     BOOST_CHECK(verify_proof(proof, chainActive.Tip()->hashClaimTrie, sName6));
     BOOST_CHECK(proof.hasValue == false);
 
-    proof = cache.getProofForName(sName7);
+    BOOST_CHECK(cache.getProofForName(sName7, proof));
     BOOST_CHECK(verify_proof(proof, chainActive.Tip()->hashClaimTrie, sName7));
     BOOST_CHECK(proof.hasValue == false);
 
@@ -2956,31 +2957,31 @@ BOOST_AUTO_TEST_CASE(value_proof_test)
 
     cache = CClaimTrieCache(pclaimTrie);
 
-    proof = cache.getProofForName(sName1);
+    BOOST_CHECK(cache.getProofForName(sName1, proof));
     BOOST_CHECK(verify_proof(proof, chainActive.Tip()->hashClaimTrie, sName1));
     BOOST_CHECK(proof.outPoint == tx1OutPoint);
 
-    proof = cache.getProofForName(sName2);
+    BOOST_CHECK(cache.getProofForName(sName2, proof));
     BOOST_CHECK(verify_proof(proof, chainActive.Tip()->hashClaimTrie, sName2));
     BOOST_CHECK(proof.outPoint == tx2OutPoint);
 
-    proof = cache.getProofForName(sName3);
+    BOOST_CHECK(cache.getProofForName(sName3, proof));
     BOOST_CHECK(verify_proof(proof, chainActive.Tip()->hashClaimTrie, sName3));
     BOOST_CHECK(proof.outPoint == tx3OutPoint);
 
-    proof = cache.getProofForName(sName4);
+    BOOST_CHECK(cache.getProofForName(sName4, proof));
     BOOST_CHECK(verify_proof(proof, chainActive.Tip()->hashClaimTrie, sName4));
     BOOST_CHECK(proof.outPoint == tx4OutPoint);
 
-    proof = cache.getProofForName(sName5);
+    BOOST_CHECK(cache.getProofForName(sName5, proof));
     BOOST_CHECK(verify_proof(proof, chainActive.Tip()->hashClaimTrie, sName5));
     BOOST_CHECK(proof.hasValue == false);
 
-    proof = cache.getProofForName(sName6);
+    BOOST_CHECK(cache.getProofForName(sName6, proof));
     BOOST_CHECK(verify_proof(proof, chainActive.Tip()->hashClaimTrie, sName6));
     BOOST_CHECK(proof.hasValue == false);
 
-    proof = cache.getProofForName(sName7);
+    BOOST_CHECK(cache.getProofForName(sName7, proof));
     BOOST_CHECK(verify_proof(proof, chainActive.Tip()->hashClaimTrie, sName7));
     BOOST_CHECK(proof.outPoint == tx5OutPoint);
 
@@ -3030,6 +3031,217 @@ BOOST_AUTO_TEST_CASE(bogus_claimtrie_hash_test)
     BOOST_CHECK(pblockTemp->block.GetHash() != chainActive.Tip()->GetBlockHash());
     BOOST_CHECK_EQUAL(orig_chain_height, chainActive.Height());
     delete pblockTemp;
+}
+
+BOOST_AUTO_TEST_CASE(getclaimsintrie_test)
+{
+    ClaimTrieChainFixture fixture;
+    std::string sName1("test");
+    std::string sValue1("test");
+    std::string sName2("test2");
+    std::string sValue2("test2");
+
+    fixture.MakeClaim(fixture.GetCoinbase(), sName1, sValue1, 42);
+    fixture.IncrementBlocks(1);
+    fixture.MakeClaim(fixture.GetCoinbase(), sName2, sValue2, 43);
+    fixture.IncrementBlocks(1);
+
+    rpcfn_type method = tableRPC["getclaimsintrie"]->actor;
+    UniValue params(UniValue::VARR);
+    UniValue results = (*method)(params, false);
+    // std::string out = results.write(3); // for debug
+    // fprintf(stderr, "%s\n", out.c_str());
+
+    BOOST_CHECK(results.size() == 2U);
+    BOOST_CHECK(results[0]["name"].get_str() == sName1);
+    BOOST_CHECK(results[1]["name"].get_str() == sName2);
+
+    params.push_back(UniValue(2));
+    results = (*method)(params, false);
+    BOOST_CHECK(results.size() == 1U);
+    BOOST_CHECK(results[0]["name"].get_str() == sName1);
+}
+
+BOOST_AUTO_TEST_CASE(getclaimtrie_test)
+{
+    ClaimTrieChainFixture fixture;
+    std::string sName1("test");
+    std::string sValue1("test");
+    std::string sName2("test2");
+    std::string sValue2("test2");
+
+    int height = chainActive.Height();
+
+    fixture.MakeClaim(fixture.GetCoinbase(), sName1, sValue1, 42);
+    fixture.IncrementBlocks(1);
+    fixture.MakeClaim(fixture.GetCoinbase(), sName2, sValue2, 43);
+    fixture.IncrementBlocks(1);
+
+    rpcfn_type method = tableRPC["getclaimtrie"]->actor;
+    UniValue params(UniValue::VARR);
+    UniValue results = (*method)(params, false);
+    // std::string out = results.write(3); // for debug
+    // fprintf(stderr, "%s\n", out.c_str());
+
+    BOOST_CHECK(results.size() == 5U);
+    BOOST_CHECK(results[3]["name"].get_str() == sName1);
+    BOOST_CHECK(results[4]["name"].get_str() == sName2);
+    BOOST_CHECK(results[3]["height"].get_int() == height + 1);
+    BOOST_CHECK(results[4]["height"].get_int() == height + 2);
+
+    params.push_back(UniValue(2));
+    results = (*method)(params, false);
+    BOOST_CHECK(results.size() == 4U);
+    BOOST_CHECK(results[3]["name"].get_str() == sName1);
+    BOOST_CHECK(results[3]["height"].get_int() == height + 1);
+}
+
+BOOST_AUTO_TEST_CASE(getvalueforname_test)
+{
+    ClaimTrieChainFixture fixture;
+    std::string sName1("testN");
+    std::string sValue1("testV");
+
+    CMutableTransaction tx1 = fixture.MakeClaim(fixture.GetCoinbase(), sName1, sValue1, 2);
+    fixture.IncrementBlocks(1);
+    fixture.MakeSupport(fixture.GetCoinbase(), tx1, sName1, 3);
+    fixture.IncrementBlocks(10);
+
+    rpcfn_type method = tableRPC["getvalueforname"]->actor;
+    UniValue params(UniValue::VARR);
+    params.push_back(UniValue(sName1));
+    UniValue results = (*method)(params, false);
+    // std::string out = results.write(3); // for debug
+    // fprintf(stderr, "%s\n", out.c_str());
+
+    BOOST_CHECK(results["value"].get_str() == sValue1);
+    BOOST_CHECK(results["amount"].get_int() == 2);
+    BOOST_CHECK(results["effective amount"].get_int() == 5);
+
+    params.push_back(UniValue(10)); // roll back 9; looks like off by 1 but this minconf is essentially 1-based as the current block is always #1
+    results = (*method)(params, false);
+    // std::string out = results.write(3); // for debug
+    // fprintf(stderr, "%s\n", out.c_str());
+    BOOST_CHECK(results["amount"].get_int() == 2);
+    BOOST_CHECK(results["effective amount"].get_int() == 2);
+}
+
+BOOST_AUTO_TEST_CASE(getclaimsforname_test)
+{
+    ClaimTrieChainFixture fixture;
+    std::string sName1("testN");
+    std::string sValue1("test1");
+    std::string sValue2("test2");
+
+    int height = chainActive.Height();
+
+    CMutableTransaction tx1 = fixture.MakeClaim(fixture.GetCoinbase(), sName1, sValue1, 2);
+    fixture.IncrementBlocks(1);
+    CMutableTransaction tx2 = fixture.MakeClaim(fixture.GetCoinbase(), sName1, sValue2, 3);
+    fixture.IncrementBlocks(1);
+
+    rpcfn_type method = tableRPC["getclaimsforname"]->actor;
+    UniValue params(UniValue::VARR);
+    params.push_back(UniValue(sName1));
+    UniValue results = (*method)(params, false);
+    // std::string out = results.write(3); // for debug
+    // fprintf(stderr, "%s\n", out.c_str());
+
+    UniValue v1 = results["claims"][0];
+    UniValue v2 = results["claims"][1];
+    if (v1["value"].get_str() == sValue2)
+        std::swap(v1, v2);
+
+    BOOST_CHECK(results["nLastTakeoverHeight"].get_int() == height + 1);
+    BOOST_CHECK(v2["nEffectiveAmount"].get_int() == 0);
+
+    fixture.IncrementBlocks(1);
+    results = (*method)(params, false);
+    // std::string out = results.write(3); // for debug
+    // fprintf(stderr, "%s\n", out.c_str());
+
+    v1 = results["claims"][0];
+    v2 = results["claims"][1];
+    if (v1["value"].get_str() == sValue2)
+        std::swap(v1, v2);
+
+    BOOST_CHECK(results["nLastTakeoverHeight"].get_int() == height + 3);
+    BOOST_CHECK(v2["nEffectiveAmount"].get_int() == 3); // THIS LINE FAILS (it still shows 0)
+
+    params.push_back(UniValue(2)); // roll back 1
+    results = (*method)(params, false);
+
+    v1 = results["claims"][0];
+    v2 = results["claims"][1];
+    if (v1["value"].get_str() == sValue2)
+        std::swap(v1, v2);
+
+    BOOST_CHECK(results["nLastTakeoverHeight"].get_int() == height + 1);
+    BOOST_CHECK(v2["nEffectiveAmount"].get_int() == 0);
+}
+
+BOOST_AUTO_TEST_CASE(claim_rpcs_rollback2_test)
+{
+    ClaimTrieChainFixture fixture;
+    std::string sName1("testN");
+    std::string sValue1("test1");
+    std::string sValue2("test2");
+
+    int height = chainActive.Height();
+
+    CMutableTransaction tx1 = fixture.MakeClaim(fixture.GetCoinbase(), sName1, sValue1, 1);
+    fixture.IncrementBlocks(2);
+    CMutableTransaction tx2 = fixture.MakeClaim(fixture.GetCoinbase(), sName1, sValue2, 2);
+    fixture.IncrementBlocks(3);
+    CMutableTransaction tx3 = fixture.MakeSupport(fixture.GetCoinbase(), tx1, sValue1, 3);
+    fixture.IncrementBlocks(1);
+
+    rpcfn_type getclaimsforname = tableRPC["getclaimsforname"]->actor;
+    rpcfn_type getvalueforname = tableRPC["getvalueforname"]->actor;
+
+    UniValue params(UniValue::VARR);
+    params.push_back(UniValue(sName1));
+    params.push_back(UniValue(2)); // roll back 1
+
+    UniValue claimsResults = (*getclaimsforname)(params, false);
+    BOOST_CHECK(claimsResults["nLastTakeoverHeight"].get_int() == height + 5);
+    BOOST_CHECK(claimsResults["claims"][0]["supports"].size() == 0U);
+    BOOST_CHECK(claimsResults["claims"][1]["supports"].size() == 0U);
+
+    UniValue valueResults = (*getvalueforname)(params, false);
+    BOOST_CHECK(valueResults["value"].get_str() == sValue2);
+    BOOST_CHECK(valueResults["amount"].get_int() == 2);
+}
+
+BOOST_AUTO_TEST_CASE(claim_rpcs_rollback3_test)
+{
+    ClaimTrieChainFixture fixture;
+    std::string sName1("testN");
+    std::string sValue1("test1");
+    std::string sValue2("test2");
+
+    int height = chainActive.Height();
+
+    CMutableTransaction tx1 = fixture.MakeClaim(fixture.GetCoinbase(), sName1, sValue1, 3);
+    fixture.IncrementBlocks(1);
+    CMutableTransaction tx2 = fixture.MakeClaim(fixture.GetCoinbase(), sName1, sValue2, 2);
+    fixture.IncrementBlocks(2);
+    CMutableTransaction tx3 = fixture.Spend(tx1); // abandon the claim
+    fixture.IncrementBlocks(1);
+
+    rpcfn_type getclaimsforname = tableRPC["getclaimsforname"]->actor;
+    rpcfn_type getvalueforname = tableRPC["getvalueforname"]->actor;
+
+    UniValue params(UniValue::VARR);
+    params.push_back(UniValue(sName1));
+    params.push_back(UniValue(2)); // roll back 1
+
+    UniValue claimsResults = (*getclaimsforname)(params, false);
+    BOOST_CHECK(claimsResults["nLastTakeoverHeight"].get_int() == height + 1);
+
+    UniValue valueResults = (*getvalueforname)(params, false);
+    BOOST_CHECK(valueResults["value"].get_str() == sValue1);
+    BOOST_CHECK(valueResults["amount"].get_int() == 3);
 }
 
 

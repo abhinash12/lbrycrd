@@ -527,22 +527,25 @@ claimsForNameType CClaimTrie::getClaimsForName(const std::string& name) const
 }
 
 //return effective amount from claim, retuns 0 if claim is not found
-CAmount CClaimTrie::getEffectiveAmountForClaim(const std::string& name, uint160 claimId) const
+CAmount CClaimTrie::getEffectiveAmountForClaim(const std::string& name, uint160 claimId, int exclusiveHeight) const
 {
     std::vector<CSupportValue> supports;
-    return getEffectiveAmountForClaimWithSupports(name, claimId, supports);
+    return getEffectiveAmountForClaimWithSupports(name, claimId, supports, exclusiveHeight);
 }
 
 //return effective amount from claim and the supports used as inputs, retuns 0 if claim is not found
 CAmount CClaimTrie::getEffectiveAmountForClaimWithSupports(const std::string& name, uint160 claimId,
-                                                           std::vector<CSupportValue>& supports) const
+                                               std::vector<CSupportValue>& supports, int exclusiveHeight) const
 {
+    if (exclusiveHeight < 1)
+        exclusiveHeight = nCurrentHeight;
+
     claimsForNameType claims = getClaimsForName(name);
     CAmount effectiveAmount = 0;
     bool claim_found = false;
     for (std::vector<CClaimValue>::iterator it=claims.claims.begin(); it!=claims.claims.end(); ++it)
     {
-        if (it->claimId == claimId && it->nValidAtHeight < nCurrentHeight)
+        if (it->claimId == claimId && it->nValidAtHeight < exclusiveHeight)
         {
             effectiveAmount += it->nAmount;
             claim_found = true;
@@ -554,7 +557,7 @@ CAmount CClaimTrie::getEffectiveAmountForClaimWithSupports(const std::string& na
 
     for (std::vector<CSupportValue>::iterator it=claims.supports.begin(); it!=claims.supports.end(); ++it)
     {
-        if (it->supportedClaimId == claimId && it->nValidAtHeight < nCurrentHeight)
+        if (it->supportedClaimId == claimId && it->nValidAtHeight < exclusiveHeight)
         {
             effectiveAmount += it->nAmount;
             supports.push_back(*it);
@@ -2554,10 +2557,75 @@ uint256 CClaimTrieCache::getLeafHashForProof(const std::string& currentPosition,
     }
 }
 
-CClaimTrieProof CClaimTrieCache::getProofForName(const std::string& name) const
+void CClaimTrieCache::recursiveFlatten(const std::string& name, const CClaimTrieNode* current, std::vector<namedNodeType>& nodes) const
+{
+    nodes.push_back(std::make_pair(name, *current));
+    nodeCacheType::const_iterator cachedNode;
+    for (nodeMapType::const_iterator it = current->children.begin(); it != current->children.end(); ++it)
+    {
+        std::string str = name + char(it->first);
+        cachedNode = cache.find(str);
+        if (cachedNode != cache.end())
+            recursiveFlatten(str, cachedNode->second, nodes);
+        else
+            recursiveFlatten(str, it->second, nodes);
+    }
+}
+
+
+std::vector<namedNodeType> CClaimTrieCache::flattenTrie() const
+{
+    std::vector<namedNodeType> nodes;
+    CClaimTrieNode* current = &(base->root);
+    nodeCacheType::const_iterator cachedNode;
+
+    for (nodeMapType::const_iterator it = current->children.begin(); it != current->children.end(); ++it)
+    {
+        std::string str(1, it->first);
+        cachedNode = cache.find(str);
+        if (cachedNode != cache.end())
+            recursiveFlatten(str, cachedNode->second, nodes);
+        else
+            recursiveFlatten(str, it->second, nodes);
+    }
+
+    return nodes;
+}
+
+bool CClaimTrieCache::getInfoForName(const std::string& name, CClaimValue& toBeFilled) const
 {
     if (dirty())
         getMerkleHash();
+
+    CClaimTrieNode* current = &(base->root);
+    nodeCacheType::const_iterator cachedNode;
+
+    for (std::string::const_iterator itName = name.begin(); current; ++itName)
+    {
+        std::string currentPosition(name.begin(), itName);
+        cachedNode = cache.find(currentPosition);
+        if (cachedNode != cache.end())
+            current = cachedNode->second;
+
+        if (itName == name.end())
+            return current->getBestClaim(toBeFilled);
+
+        for (nodeMapType::const_iterator itChildren = current->children.begin(); itChildren != current->children.end(); ++itChildren)
+        {
+            if (itChildren->first == *itName) {
+                current = itChildren->second;
+                break;
+            }
+        }
+    }
+    return false;
+}
+
+bool CClaimTrieCache::getProofForName(const std::string& name, CClaimTrieProof& toBeFilled) const
+{
+    if (dirty())
+        getMerkleHash();
+
     std::vector<CClaimTrieProofNode> nodes;
     CClaimTrieNode* current = &(base->root);
     nodeCacheType::const_iterator cachedNode;
@@ -2575,9 +2643,10 @@ CClaimTrieProof CClaimTrieCache::getProofForName(const std::string& name) const
         uint256 valueHash;
         if (fNodeHasValue)
         {
-            int nHeightOfLastTakeover;
-            assert(getLastTakeoverForName(currentPosition, nHeightOfLastTakeover));
-            valueHash = getValueHash(claim.outPoint, nHeightOfLastTakeover);
+            int nHeightOfLastTakeover2;
+            if (!getLastTakeoverForName(currentPosition, nHeightOfLastTakeover2))
+                return false;
+            valueHash = getValueHash(claim.outPoint, nHeightOfLastTakeover2);
         }
         std::vector<std::pair<unsigned char, uint256> > children;
         CClaimTrieNode* nextCurrent = NULL;
@@ -2601,7 +2670,8 @@ CClaimTrieProof CClaimTrieCache::getProofForName(const std::string& name) const
             if (fNameHasValue)
             {
                 outPoint = claim.outPoint;
-                assert(getLastTakeoverForName(name, nHeightOfLastTakeover));
+                if (!getLastTakeoverForName(name, nHeightOfLastTakeover))
+                    return false;
             }
             valueHash.SetNull();
         }
@@ -2609,8 +2679,8 @@ CClaimTrieProof CClaimTrieCache::getProofForName(const std::string& name) const
         nodes.push_back(node);
         current = nextCurrent;
     }
-    return CClaimTrieProof(nodes, fNameHasValue, outPoint,
-                           nHeightOfLastTakeover);
+    toBeFilled = CClaimTrieProof(nodes, fNameHasValue, outPoint, nHeightOfLastTakeover);
+    return true;
 }
 
 
